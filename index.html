@@ -1967,6 +1967,19 @@ function searchWholeFoods(query) {
 // ══════════════════════════════════════════════
 let pendingFood = null;
 
+// USDA FoodData Central — free public API
+const USDA_KEY = 'DEMO_KEY'; // Works for normal usage, upgrade at fdc.nal.usda.gov if needed
+
+async function usdaSearch(query) {
+  const res = await fetch(`https://api.nal.usda.gov/fdc/v1/foods/search?query=${encodeURIComponent(query)}&pageSize=5&api_key=${USDA_KEY}&dataType=Branded,SR%20Legacy,Survey%20(FNDDS)`);
+  return await res.json();
+}
+
+function usdaNutrient(nutrients, id) {
+  const n = nutrients.find(n => n.nutrientId === id);
+  return n ? n.value : 0;
+}
+
 async function lookupFood() {
   const query = document.getElementById('food-query').value.trim();
   const serving = parseFloat(document.getElementById('food-serving').value) || 1;
@@ -1980,20 +1993,19 @@ async function lookupFood() {
   const resultEl = document.getElementById('food-result');
   resultEl.innerHTML = '<div class="loading-dots"><div class="dot"></div><div class="dot"></div><div class="dot"></div></div>';
 
-  // 1. Whole foods built-in database first — always English, always accurate
+  // 1. Built-in whole foods DB first — instant, always accurate
   const localMatch = searchWholeFoods(query);
   if (localMatch) {
-    const mult = serving;
     pendingFood = {
       name: localMatch.name,
-      serving: mult === 1 ? localMatch.serving : `${mult}x ${localMatch.serving}`,
-      calories: Math.round(localMatch.cal * mult),
-      protein:  Math.round(localMatch.p * mult * 10) / 10,
-      carbs:    Math.round(localMatch.c * mult * 10) / 10,
-      fat:      Math.round(localMatch.f * mult * 10) / 10,
-      sugar:    Math.round(localMatch.s * mult * 10) / 10,
-      fiber:    Math.round(localMatch.fi * mult * 10) / 10,
-      sodium:   Math.round(localMatch.sod * mult),
+      serving: serving === 1 ? localMatch.serving : `${serving}x ${localMatch.serving}`,
+      calories: Math.round(localMatch.cal * serving),
+      protein:  Math.round(localMatch.p  * serving * 10) / 10,
+      carbs:    Math.round(localMatch.c  * serving * 10) / 10,
+      fat:      Math.round(localMatch.f  * serving * 10) / 10,
+      sugar:    Math.round(localMatch.s  * serving * 10) / 10,
+      fiber:    Math.round(localMatch.fi * serving * 10) / 10,
+      sodium:   Math.round(localMatch.sod * serving),
       source: 'Built-in database'
     };
     showFoodResult(resultEl);
@@ -2001,43 +2013,36 @@ async function lookupFood() {
     return;
   }
 
-  // 2. Open Food Facts — fallback for packaged/branded items, English only
+  // 2. USDA FoodData Central
   try {
-    const res = await fetch(`https://world.openfoodfacts.org/cgi/search.pl?search_terms=${encodeURIComponent(query)}&search_simple=1&action=process&json=1&page_size=20&fields=product_name,nutriments,serving_size,serving_quantity,brands,lang`);
-    const data = await res.json();
-    const products = (data.products || []).filter(p => {
-      if (!p.product_name || !p.nutriments || !p.nutriments['energy-kcal_100g']) return false;
-      if (p.lang && p.lang !== 'en') return false;
-      if (/[^\x00-\x7F]/.test(p.product_name)) return false;
-      return true;
-    });
+    const data = await usdaSearch(query);
+    const foods = data.foods || [];
 
-    if (products.length > 0) {
-      const p = products[0];
-      const n = p.nutriments;
-      const servingG = parseFloat(p.serving_quantity) || 100;
-      const scaleFactor = (unit === 'serving') ? serving : 1;
+    if (foods.length > 0) {
+      const food = foods[0];
+      const n = food.foodNutrients || [];
+      // USDA nutrient IDs: 1008=calories, 1003=protein, 1005=carbs, 1004=fat, 2000=sugar, 1079=fiber, 1093=sodium
+      const servingG = food.servingSize || 100;
+      const scale = serving;
 
       pendingFood = {
-        name: p.product_name + (p.brands ? ` (${p.brands.split(',')[0].trim()})` : ''),
-        serving: unit === 'serving' ? `${serving} serving${serving !== 1 ? 's' : ''} (${Math.round(servingG * serving)}g)` : `${serving} ${unit}`,
-        calories: Math.round((n['energy-kcal_serving'] || n['energy-kcal_100g'] * servingG / 100) * scaleFactor),
-        protein:  Math.round((n.proteins_serving   || n.proteins_100g   * servingG / 100) * scaleFactor),
-        carbs:    Math.round((n.carbohydrates_serving || n.carbohydrates_100g * servingG / 100) * scaleFactor),
-        fat:      Math.round((n.fat_serving        || n.fat_100g        * servingG / 100) * scaleFactor),
-        sugar:    Math.round((n.sugars_serving     || n.sugars_100g     * servingG / 100) * scaleFactor),
-        fiber:    Math.round((n.fiber_serving      || n.fiber_100g      * servingG / 100) * scaleFactor),
-        sodium:   Math.round(((n.sodium_serving    || n.sodium_100g     * servingG / 100) * scaleFactor) * 1000),
-        source: 'Open Food Facts'
+        name: food.description,
+        serving: `${serving} ${unit}${food.servingSizeUnit ? ` (${Math.round(servingG * serving)}${food.servingSizeUnit})` : ''}`,
+        calories: Math.round(usdaNutrient(n, 1008) * scale),
+        protein:  Math.round(usdaNutrient(n, 1003) * scale * 10) / 10,
+        carbs:    Math.round(usdaNutrient(n, 1005) * scale * 10) / 10,
+        fat:      Math.round(usdaNutrient(n, 1004) * scale * 10) / 10,
+        sugar:    Math.round(usdaNutrient(n, 2000) * scale * 10) / 10,
+        fiber:    Math.round(usdaNutrient(n, 1079) * scale * 10) / 10,
+        sodium:   Math.round(usdaNutrient(n, 1093) * scale),
+        source: 'USDA FoodData'
       };
-
       showFoodResult(resultEl);
       btn.textContent = 'Look Up Nutrition Info'; btn.disabled = false;
       return;
     }
   } catch(e) { /* fall through */ }
 
-  // Nothing found — helpful message with suggestions
   resultEl.innerHTML = `
     <div style="background:var(--warm-pale);border-radius:var(--radius-sm);padding:16px;font-size:13px;line-height:1.6">
       <strong>No results for "${query}"</strong><br><br>
@@ -2173,25 +2178,26 @@ async function lookupBarcode(code) {
   resultEl.innerHTML = '<div class="loading-dots"><div class="dot"></div><div class="dot"></div><div class="dot"></div></div>';
 
   try {
-    const res = await fetch(`https://world.openfoodfacts.org/api/v0/product/${code}.json`);
+    // USDA supports UPC barcode search
+    const res = await fetch(`https://api.nal.usda.gov/fdc/v1/foods/search?query=${code}&api_key=${USDA_KEY}&dataType=Branded`);
     const data = await res.json();
+    const foods = (data.foods || []).filter(f => f.gtinUpc === code || f.gtinUpc === code.padStart(14,'0'));
+    const food = foods[0] || data.foods?.[0];
 
-    if (data.status === 1 && data.product) {
-      const p = data.product;
-      const n = p.nutriments || {};
-      const servingG = parseFloat(p.serving_quantity) || 100;
-
+    if (food) {
+      const n = food.foodNutrients || [];
+      const servingG = food.servingSize || 100;
       pendingFood = {
-        name: p.product_name || 'Unknown Product',
-        serving: p.serving_size || `${servingG}g`,
-        calories: Math.round(n['energy-kcal_serving'] || n['energy-kcal_100g'] * servingG / 100 || 0),
-        protein:  Math.round(n.proteins_serving   || n.proteins_100g   * servingG / 100 || 0),
-        carbs:    Math.round(n.carbohydrates_serving || n.carbohydrates_100g * servingG / 100 || 0),
-        fat:      Math.round(n.fat_serving        || n.fat_100g        * servingG / 100 || 0),
-        sugar:    Math.round(n.sugars_serving     || n.sugars_100g     * servingG / 100 || 0),
-        fiber:    Math.round(n.fiber_serving      || n.fiber_100g      * servingG / 100 || 0),
-        sodium:   Math.round(((n.sodium_serving   || n.sodium_100g     * servingG / 100) || 0) * 1000),
-        source: 'Open Food Facts'
+        name: food.description,
+        serving: `1 serving${food.servingSize ? ` (${food.servingSize}${food.servingSizeUnit || 'g'})` : ''}`,
+        calories: Math.round(usdaNutrient(n, 1008)),
+        protein:  Math.round(usdaNutrient(n, 1003) * 10) / 10,
+        carbs:    Math.round(usdaNutrient(n, 1005) * 10) / 10,
+        fat:      Math.round(usdaNutrient(n, 1004) * 10) / 10,
+        sugar:    Math.round(usdaNutrient(n, 2000) * 10) / 10,
+        fiber:    Math.round(usdaNutrient(n, 1079) * 10) / 10,
+        sodium:   Math.round(usdaNutrient(n, 1093)),
+        source: 'USDA FoodData'
       };
       showFoodResult(resultEl);
     } else {
@@ -2957,18 +2963,18 @@ async function lookupIngredient() {
   const resultEl = document.getElementById('ing-result');
   resultEl.innerHTML = '<div class="loading-dots"><div class="dot"></div><div class="dot"></div><div class="dot"></div></div>';
 
-  // 1. Built-in whole foods DB first — always accurate, always English
+  // 1. Built-in whole foods DB first
   const local = searchWholeFoods(query);
   if (local) {
     pendingIngredient = {
       name: local.name,
       serving: `${serving} ${unit}`,
       calories: Math.round(local.cal * serving),
-      protein:  Math.round(local.p   * serving * 10)/10,
-      carbs:    Math.round(local.c   * serving * 10)/10,
-      fat:      Math.round(local.f   * serving * 10)/10,
-      sugar:    Math.round(local.s   * serving * 10)/10,
-      fiber:    Math.round(local.fi  * serving * 10)/10,
+      protein:  Math.round(local.p   * serving * 10) / 10,
+      carbs:    Math.round(local.c   * serving * 10) / 10,
+      fat:      Math.round(local.f   * serving * 10) / 10,
+      sugar:    Math.round(local.s   * serving * 10) / 10,
+      fiber:    Math.round(local.fi  * serving * 10) / 10,
       sodium:   Math.round(local.sod * serving),
     };
     showIngredientResult(resultEl);
@@ -2976,37 +2982,23 @@ async function lookupIngredient() {
     return;
   }
 
-  // 2. Open Food Facts — fallback for packaged/branded items not in local DB
-  // Filter to English-language results only
+  // 2. USDA FoodData Central
   try {
-    const res = await fetch(`https://world.openfoodfacts.org/cgi/search.pl?search_terms=${encodeURIComponent(query)}&search_simple=1&action=process&json=1&page_size=20&fields=product_name,nutriments,serving_size,serving_quantity,brands,lang`);
-    const data = await res.json();
+    const data = await usdaSearch(query);
+    const food = (data.foods || [])[0];
 
-    // Only accept products with English names (no accents, foreign chars) and valid nutrition
-    const products = (data.products || []).filter(p => {
-      if (!p.product_name || !p.nutriments || !p.nutriments['energy-kcal_100g']) return false;
-      if (p.lang && p.lang !== 'en') return false;
-      // Reject if name contains non-ASCII characters (French accents, Polish chars, etc.)
-      if (/[^\x00-\x7F]/.test(p.product_name)) return false;
-      return true;
-    });
-
-    if (products.length > 0) {
-      const p = products[0];
-      const n = p.nutriments;
-      const servingG = parseFloat(p.serving_quantity) || 100;
-      const scale = unit === 'serving' ? serving : 1;
-
+    if (food) {
+      const n = food.foodNutrients || [];
       pendingIngredient = {
-        name: p.product_name + (p.brands ? ` (${p.brands.split(',')[0].trim()})` : ''),
+        name: food.description,
         serving: `${serving} ${unit}`,
-        calories: Math.round((n['energy-kcal_serving'] || n['energy-kcal_100g'] * servingG/100) * scale),
-        protein:  Math.round((n.proteins_serving   || n.proteins_100g   * servingG/100) * scale * 10)/10,
-        carbs:    Math.round((n.carbohydrates_serving || n.carbohydrates_100g * servingG/100) * scale * 10)/10,
-        fat:      Math.round((n.fat_serving        || n.fat_100g        * servingG/100) * scale * 10)/10,
-        sugar:    Math.round((n.sugars_serving     || n.sugars_100g     * servingG/100) * scale * 10)/10,
-        fiber:    Math.round((n.fiber_serving      || n.fiber_100g      * servingG/100) * scale * 10)/10,
-        sodium:   Math.round(((n.sodium_serving    || n.sodium_100g     * servingG/100) * scale) * 1000),
+        calories: Math.round(usdaNutrient(n, 1008) * serving),
+        protein:  Math.round(usdaNutrient(n, 1003) * serving * 10) / 10,
+        carbs:    Math.round(usdaNutrient(n, 1005) * serving * 10) / 10,
+        fat:      Math.round(usdaNutrient(n, 1004) * serving * 10) / 10,
+        sugar:    Math.round(usdaNutrient(n, 2000) * serving * 10) / 10,
+        fiber:    Math.round(usdaNutrient(n, 1079) * serving * 10) / 10,
+        sodium:   Math.round(usdaNutrient(n, 1093) * serving),
       };
       showIngredientResult(resultEl);
       btn.textContent = 'Look Up Ingredient'; btn.disabled = false;
