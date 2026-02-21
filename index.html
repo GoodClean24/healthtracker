@@ -1980,17 +1980,42 @@ async function lookupFood() {
   const resultEl = document.getElementById('food-result');
   resultEl.innerHTML = '<div class="loading-dots"><div class="dot"></div><div class="dot"></div><div class="dot"></div></div>';
 
-  // 1. Try Open Food Facts search first (great for packaged foods)
+  // 1. Whole foods built-in database first — always English, always accurate
+  const localMatch = searchWholeFoods(query);
+  if (localMatch) {
+    const mult = serving;
+    pendingFood = {
+      name: localMatch.name,
+      serving: mult === 1 ? localMatch.serving : `${mult}x ${localMatch.serving}`,
+      calories: Math.round(localMatch.cal * mult),
+      protein:  Math.round(localMatch.p * mult * 10) / 10,
+      carbs:    Math.round(localMatch.c * mult * 10) / 10,
+      fat:      Math.round(localMatch.f * mult * 10) / 10,
+      sugar:    Math.round(localMatch.s * mult * 10) / 10,
+      fiber:    Math.round(localMatch.fi * mult * 10) / 10,
+      sodium:   Math.round(localMatch.sod * mult),
+      source: 'Built-in database'
+    };
+    showFoodResult(resultEl);
+    btn.textContent = 'Look Up Nutrition Info'; btn.disabled = false;
+    return;
+  }
+
+  // 2. Open Food Facts — fallback for packaged/branded items, English only
   try {
-    const res = await fetch(`https://world.openfoodfacts.org/cgi/search.pl?search_terms=${encodeURIComponent(query)}&search_simple=1&action=process&json=1&page_size=5&fields=product_name,nutriments,serving_size,serving_quantity,brands`);
+    const res = await fetch(`https://world.openfoodfacts.org/cgi/search.pl?search_terms=${encodeURIComponent(query)}&search_simple=1&action=process&json=1&page_size=20&fields=product_name,nutriments,serving_size,serving_quantity,brands,lang`);
     const data = await res.json();
-    const products = (data.products || []).filter(p => p.product_name && p.nutriments && p.nutriments['energy-kcal_100g']);
+    const products = (data.products || []).filter(p => {
+      if (!p.product_name || !p.nutriments || !p.nutriments['energy-kcal_100g']) return false;
+      if (p.lang && p.lang !== 'en') return false;
+      if (/[^\x00-\x7F]/.test(p.product_name)) return false;
+      return true;
+    });
 
     if (products.length > 0) {
       const p = products[0];
       const n = p.nutriments;
       const servingG = parseFloat(p.serving_quantity) || 100;
-      // Scale by user's serving input if unit is servings
       const scaleFactor = (unit === 'serving') ? serving : 1;
 
       pendingFood = {
@@ -2010,31 +2035,9 @@ async function lookupFood() {
       btn.textContent = 'Look Up Nutrition Info'; btn.disabled = false;
       return;
     }
-  } catch(e) { /* fall through to local DB */ }
+  } catch(e) { /* fall through */ }
 
-  // 2. Whole foods built-in database
-  const localMatch = searchWholeFoods(query);
-  if (localMatch) {
-    // Scale numerically by serving multiplier
-    const mult = serving;
-    pendingFood = {
-      name: localMatch.name,
-      serving: mult === 1 ? localMatch.serving : `${mult}x ${localMatch.serving}`,
-      calories: Math.round(localMatch.cal * mult),
-      protein:  Math.round(localMatch.p * mult * 10) / 10,
-      carbs:    Math.round(localMatch.c * mult * 10) / 10,
-      fat:      Math.round(localMatch.f * mult * 10) / 10,
-      sugar:    Math.round(localMatch.s * mult * 10) / 10,
-      fiber:    Math.round(localMatch.fi * mult * 10) / 10,
-      sodium:   Math.round(localMatch.sod * mult),
-      source: 'Built-in database'
-    };
-    showFoodResult(resultEl);
-    btn.textContent = 'Look Up Nutrition Info'; btn.disabled = false;
-    return;
-  }
-
-  // 3. Nothing found — helpful message with suggestions
+  // Nothing found — helpful message with suggestions
   resultEl.innerHTML = `
     <div style="background:var(--warm-pale);border-radius:var(--radius-sm);padding:16px;font-size:13px;line-height:1.6">
       <strong>No results for "${query}"</strong><br><br>
@@ -2954,11 +2957,39 @@ async function lookupIngredient() {
   const resultEl = document.getElementById('ing-result');
   resultEl.innerHTML = '<div class="loading-dots"><div class="dot"></div><div class="dot"></div><div class="dot"></div></div>';
 
-  // 1. Open Food Facts
+  // 1. Built-in whole foods DB first — always accurate, always English
+  const local = searchWholeFoods(query);
+  if (local) {
+    pendingIngredient = {
+      name: local.name,
+      serving: `${serving} ${unit}`,
+      calories: Math.round(local.cal * serving),
+      protein:  Math.round(local.p   * serving * 10)/10,
+      carbs:    Math.round(local.c   * serving * 10)/10,
+      fat:      Math.round(local.f   * serving * 10)/10,
+      sugar:    Math.round(local.s   * serving * 10)/10,
+      fiber:    Math.round(local.fi  * serving * 10)/10,
+      sodium:   Math.round(local.sod * serving),
+    };
+    showIngredientResult(resultEl);
+    btn.textContent = 'Look Up Ingredient'; btn.disabled = false;
+    return;
+  }
+
+  // 2. Open Food Facts — fallback for packaged/branded items not in local DB
+  // Filter to English-language results only
   try {
-    const res = await fetch(`https://world.openfoodfacts.org/cgi/search.pl?search_terms=${encodeURIComponent(query)}&search_simple=1&action=process&json=1&page_size=5&fields=product_name,nutriments,serving_size,serving_quantity,brands`);
+    const res = await fetch(`https://world.openfoodfacts.org/cgi/search.pl?search_terms=${encodeURIComponent(query)}&search_simple=1&action=process&json=1&page_size=20&fields=product_name,nutriments,serving_size,serving_quantity,brands,lang`);
     const data = await res.json();
-    const products = (data.products || []).filter(p => p.product_name && p.nutriments && p.nutriments['energy-kcal_100g']);
+
+    // Only accept products with English names (no accents, foreign chars) and valid nutrition
+    const products = (data.products || []).filter(p => {
+      if (!p.product_name || !p.nutriments || !p.nutriments['energy-kcal_100g']) return false;
+      if (p.lang && p.lang !== 'en') return false;
+      // Reject if name contains non-ASCII characters (French accents, Polish chars, etc.)
+      if (/[^\x00-\x7F]/.test(p.product_name)) return false;
+      return true;
+    });
 
     if (products.length > 0) {
       const p = products[0];
@@ -2983,26 +3014,7 @@ async function lookupIngredient() {
     }
   } catch(e) {}
 
-  // 2. Built-in whole foods DB
-  const local = searchWholeFoods(query);
-  if (local) {
-    pendingIngredient = {
-      name: local.name,
-      serving: `${serving} ${unit}`,
-      calories: Math.round(local.cal * serving),
-      protein:  Math.round(local.p   * serving * 10)/10,
-      carbs:    Math.round(local.c   * serving * 10)/10,
-      fat:      Math.round(local.f   * serving * 10)/10,
-      sugar:    Math.round(local.s   * serving * 10)/10,
-      fiber:    Math.round(local.fi  * serving * 10)/10,
-      sodium:   Math.round(local.sod * serving),
-    };
-    showIngredientResult(resultEl);
-    btn.textContent = 'Look Up Ingredient'; btn.disabled = false;
-    return;
-  }
-
-  resultEl.innerHTML = `<div style="font-size:13px;color:var(--text-mid);padding:8px">Not found. Try simpler terms like "eggs", "sausage", or "cheddar cheese".</div>`;
+  resultEl.innerHTML = `<div style="font-size:13px;color:var(--text-mid);padding:8px">Not found. Try simpler terms like "eggs", "ground turkey", or "cheddar cheese".</div>`;
   btn.textContent = 'Look Up Ingredient'; btn.disabled = false;
 }
 
