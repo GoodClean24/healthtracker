@@ -1953,31 +1953,70 @@ const WHOLE_FOODS_DB = [
 
 function searchWholeFoods(query) {
   const q = query.toLowerCase().trim();
-  // exact keyword match first
-  let match = WHOLE_FOODS_DB.find(f => f.k.some(k => q.includes(k) || k.includes(q)));
-  if (!match) {
-    // partial word match
-    match = WHOLE_FOODS_DB.find(f => f.k.some(k => k.split(' ').some(word => q.includes(word) && word.length > 3)));
-  }
-  return match || null;
+
+  // If query looks like a brand name or multi-word brand search, skip local DB entirely
+  // Brand indicators: contains a proper noun pattern, more than 2 words, or known brand names
+  const brandWords = ['fairlife','chobani','quest','fairlife','muscle milk','premier','kind','clif','rxbar',
+    'larabar','kind','oikos','fage','siggi','noosa','activia','yoplait','dannon','stonyfield',
+    'naked','bolthouse','odwalla','tropicana','minute maid','simply','suja','califia',
+    'silk','oatly','ripple','good karma','kite hill','kashi','nature valley','rx',
+    'built bar','one bar','kirkland','costco','trader joe','whole foods 365',
+    'amy','annie','newman','applegate','horizon','organic valley'];
+
+  if (brandWords.some(b => q.includes(b))) return null;
+
+  // If query is more than 3 words, it's probably a branded/specific item — skip local
+  if (q.split(' ').length > 3) return null;
+
+  // Only match if a keyword is an EXACT match or the query IS the keyword
+  const match = WHOLE_FOODS_DB.find(f =>
+    f.k.some(k => k === q || q === k)
+  );
+  if (match) return match;
+
+  // Allow close match: query contains full keyword (not just a word fragment)
+  return WHOLE_FOODS_DB.find(f =>
+    f.k.some(k => q.includes(k) && k.length >= 4)
+  ) || null;
 }
 
 // ══════════════════════════════════════════════
-// FOOD LOOKUP — Open Food Facts + Whole Foods DB
+// FOOD LOOKUP — USDA FoodData Central
 // ══════════════════════════════════════════════
 let pendingFood = null;
 
-// USDA FoodData Central — free public API
-const USDA_KEY = 'DEMO_KEY'; // Works for normal usage, upgrade at fdc.nal.usda.gov if needed
+const USDA_KEY = 'DEMO_KEY';
 
 async function usdaSearch(query) {
-  const res = await fetch(`https://api.nal.usda.gov/fdc/v1/foods/search?query=${encodeURIComponent(query)}&pageSize=5&api_key=${USDA_KEY}&dataType=Branded,SR%20Legacy,Survey%20(FNDDS)`);
-  return await res.json();
+  // Search branded + foundation + survey foods
+  const url = `https://api.nal.usda.gov/fdc/v1/foods/search?query=${encodeURIComponent(query)}&pageSize=10&api_key=${USDA_KEY}&dataType=Branded,Foundation,SR%20Legacy,Survey%20(FNDDS)`;
+  const res = await fetch(url);
+  const data = await res.json();
+  return data.foods || [];
 }
 
 function usdaNutrient(nutrients, id) {
-  const n = nutrients.find(n => n.nutrientId === id);
-  return n ? n.value : 0;
+  const n = (nutrients || []).find(n => n.nutrientId === id || n.nutrientNumber === String(id));
+  return n ? (n.value || 0) : 0;
+}
+
+function usdaBuildFood(food, servingMult) {
+  const n = food.foodNutrients || [];
+  // Use householdServingFullText or servingSize for the label
+  const servingLabel = food.householdServingFullText || (food.servingSize ? `${food.servingSize}${food.servingSizeUnit || 'g'}` : '1 serving');
+  const mult = servingMult || 1;
+  return {
+    name: food.description || food.lowercaseDescription || 'Unknown',
+    serving: mult === 1 ? servingLabel : `${mult}x ${servingLabel}`,
+    calories: Math.round(usdaNutrient(n, 1008) * mult),
+    protein:  Math.round(usdaNutrient(n, 1003) * mult * 10) / 10,
+    carbs:    Math.round(usdaNutrient(n, 1005) * mult * 10) / 10,
+    fat:      Math.round(usdaNutrient(n, 1004) * mult * 10) / 10,
+    sugar:    Math.round(usdaNutrient(n, 2000) * mult * 10) / 10,
+    fiber:    Math.round(usdaNutrient(n, 1079) * mult * 10) / 10,
+    sodium:   Math.round(usdaNutrient(n, 1093) * mult),
+    source: 'USDA FoodData'
+  };
 }
 
 async function lookupFood() {
@@ -1993,7 +2032,7 @@ async function lookupFood() {
   const resultEl = document.getElementById('food-result');
   resultEl.innerHTML = '<div class="loading-dots"><div class="dot"></div><div class="dot"></div><div class="dot"></div></div>';
 
-  // 1. Built-in whole foods DB first — instant, always accurate
+  // 1. Built-in DB — only for simple generic terms, not brand searches
   const localMatch = searchWholeFoods(query);
   if (localMatch) {
     pendingFood = {
@@ -2015,28 +2054,9 @@ async function lookupFood() {
 
   // 2. USDA FoodData Central
   try {
-    const data = await usdaSearch(query);
-    const foods = data.foods || [];
-
+    const foods = await usdaSearch(query);
     if (foods.length > 0) {
-      const food = foods[0];
-      const n = food.foodNutrients || [];
-      // USDA nutrient IDs: 1008=calories, 1003=protein, 1005=carbs, 1004=fat, 2000=sugar, 1079=fiber, 1093=sodium
-      const servingG = food.servingSize || 100;
-      const scale = serving;
-
-      pendingFood = {
-        name: food.description,
-        serving: `${serving} ${unit}${food.servingSizeUnit ? ` (${Math.round(servingG * serving)}${food.servingSizeUnit})` : ''}`,
-        calories: Math.round(usdaNutrient(n, 1008) * scale),
-        protein:  Math.round(usdaNutrient(n, 1003) * scale * 10) / 10,
-        carbs:    Math.round(usdaNutrient(n, 1005) * scale * 10) / 10,
-        fat:      Math.round(usdaNutrient(n, 1004) * scale * 10) / 10,
-        sugar:    Math.round(usdaNutrient(n, 2000) * scale * 10) / 10,
-        fiber:    Math.round(usdaNutrient(n, 1079) * scale * 10) / 10,
-        sodium:   Math.round(usdaNutrient(n, 1093) * scale),
-        source: 'USDA FoodData'
-      };
+      pendingFood = usdaBuildFood(foods[0], serving);
       showFoodResult(resultEl);
       btn.textContent = 'Look Up Nutrition Info'; btn.disabled = false;
       return;
@@ -2047,9 +2067,8 @@ async function lookupFood() {
     <div style="background:var(--warm-pale);border-radius:var(--radius-sm);padding:16px;font-size:13px;line-height:1.6">
       <strong>No results for "${query}"</strong><br><br>
       Try being more specific — for example:<br>
-      • "chicken breast" instead of "chicken"<br>
-      • "Chobani plain greek yogurt" for a brand<br>
-      • "oatmeal" or "scrambled eggs"<br><br>
+      • "Fairlife chocolate milk" or "Chobani plain greek yogurt"<br>
+      • "chicken breast" or "scrambled eggs"<br><br>
       Or scan the barcode if it's a packaged item.
     </div>`;
   btn.textContent = 'Look Up Nutrition Info'; btn.disabled = false;
@@ -2178,35 +2197,44 @@ async function lookupBarcode(code) {
   resultEl.innerHTML = '<div class="loading-dots"><div class="dot"></div><div class="dot"></div><div class="dot"></div></div>';
 
   try {
-    // USDA supports UPC barcode search
-    const res = await fetch(`https://api.nal.usda.gov/fdc/v1/foods/search?query=${code}&api_key=${USDA_KEY}&dataType=Branded`);
-    const data = await res.json();
-    const foods = (data.foods || []).filter(f => f.gtinUpc === code || f.gtinUpc === code.padStart(14,'0'));
-    const food = foods[0] || data.foods?.[0];
+    // Try multiple UPC formats — USDA stores them inconsistently
+    const upcFormats = [
+      code,
+      code.padStart(12, '0'),
+      code.padStart(13, '0'),
+      code.padStart(14, '0'),
+      code.replace(/^0+/, '') // strip leading zeros
+    ];
+
+    let food = null;
+
+    // First try: exact UPC match in USDA branded foods
+    for (const upc of upcFormats) {
+      const res = await fetch(`https://api.nal.usda.gov/fdc/v1/foods/search?query=${upc}&api_key=${USDA_KEY}&dataType=Branded&pageSize=5`);
+      const data = await res.json();
+      const foods = data.foods || [];
+      food = foods.find(f => upcFormats.includes(f.gtinUpc)) || null;
+      if (food) break;
+    }
+
+    // Second try: if no exact UPC match, use first branded result from code as search term
+    if (!food) {
+      const res = await fetch(`https://api.nal.usda.gov/fdc/v1/foods/search?query=${code}&api_key=${USDA_KEY}&dataType=Branded&pageSize=3`);
+      const data = await res.json();
+      food = (data.foods || [])[0] || null;
+    }
 
     if (food) {
-      const n = food.foodNutrients || [];
-      const servingG = food.servingSize || 100;
-      pendingFood = {
-        name: food.description,
-        serving: `1 serving${food.servingSize ? ` (${food.servingSize}${food.servingSizeUnit || 'g'})` : ''}`,
-        calories: Math.round(usdaNutrient(n, 1008)),
-        protein:  Math.round(usdaNutrient(n, 1003) * 10) / 10,
-        carbs:    Math.round(usdaNutrient(n, 1005) * 10) / 10,
-        fat:      Math.round(usdaNutrient(n, 1004) * 10) / 10,
-        sugar:    Math.round(usdaNutrient(n, 2000) * 10) / 10,
-        fiber:    Math.round(usdaNutrient(n, 1079) * 10) / 10,
-        sodium:   Math.round(usdaNutrient(n, 1093)),
-        source: 'USDA FoodData'
-      };
+      pendingFood = usdaBuildFood(food, 1);
       showFoodResult(resultEl);
     } else {
-      resultEl.innerHTML = `<div style="font-size:13px;color:var(--text-mid);padding:12px;text-align:center">
-        Product not found for barcode <strong>${code}</strong>.<br>Try searching by name instead.
+      resultEl.innerHTML = `<div style="font-size:13px;color:var(--text-mid);padding:16px;text-align:center">
+        Barcode <strong>${code}</strong> not found in the database.<br><br>
+        Try searching by name — type the product name in the Search tab.
       </div>`;
     }
   } catch(e) {
-    resultEl.innerHTML = `<div style="font-size:13px;color:var(--red);padding:12px">Lookup failed — check your connection.</div>`;
+    resultEl.innerHTML = `<div style="font-size:13px;color:var(--red);padding:12px;text-align:center">Lookup failed — check your connection and try again.</div>`;
   }
 }
 
@@ -2963,7 +2991,7 @@ async function lookupIngredient() {
   const resultEl = document.getElementById('ing-result');
   resultEl.innerHTML = '<div class="loading-dots"><div class="dot"></div><div class="dot"></div><div class="dot"></div></div>';
 
-  // 1. Built-in whole foods DB first
+  // 1. Built-in whole foods DB — only for simple generic terms
   const local = searchWholeFoods(query);
   if (local) {
     pendingIngredient = {
@@ -2984,21 +3012,19 @@ async function lookupIngredient() {
 
   // 2. USDA FoodData Central
   try {
-    const data = await usdaSearch(query);
-    const food = (data.foods || [])[0];
-
-    if (food) {
-      const n = food.foodNutrients || [];
+    const foods = await usdaSearch(query);
+    if (foods.length > 0) {
+      const f = usdaBuildFood(foods[0], serving);
       pendingIngredient = {
-        name: food.description,
+        name: f.name,
         serving: `${serving} ${unit}`,
-        calories: Math.round(usdaNutrient(n, 1008) * serving),
-        protein:  Math.round(usdaNutrient(n, 1003) * serving * 10) / 10,
-        carbs:    Math.round(usdaNutrient(n, 1005) * serving * 10) / 10,
-        fat:      Math.round(usdaNutrient(n, 1004) * serving * 10) / 10,
-        sugar:    Math.round(usdaNutrient(n, 2000) * serving * 10) / 10,
-        fiber:    Math.round(usdaNutrient(n, 1079) * serving * 10) / 10,
-        sodium:   Math.round(usdaNutrient(n, 1093) * serving),
+        calories: f.calories,
+        protein:  f.protein,
+        carbs:    f.carbs,
+        fat:      f.fat,
+        sugar:    f.sugar,
+        fiber:    f.fiber,
+        sodium:   f.sodium,
       };
       showIngredientResult(resultEl);
       btn.textContent = 'Look Up Ingredient'; btn.disabled = false;
